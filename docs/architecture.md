@@ -1,214 +1,186 @@
 # ggcode-acp-go architecture
 
-`ggcode-acp-go` extracts the **ACP client-side runtime** out of ggcode while leaving ggcode-specific
-host/server behavior in the main repository.
+`ggcode-acp-go` is no longer just a thin ACP transport/client extraction.
 
-## Design goals
+It now has two stacked layers:
 
-1. keep the reusable ACP stdio client logic in a standalone Go module
-2. preserve support for the ACP-capable CLIs ggcode already knows how to discover
-3. let hosts adapt their own permission/UI abstractions instead of inheriting ggcode internals
-4. keep ggcode's ACP server, auth, and session-host behavior local to ggcode
+1. a reusable ACP library layer
+2. a product/runtime layer that provides acpx-style durable sessions, history, queueing, config, and CLI flows
 
 ## High-level layout
 
 ```text
-                    Host application
-       (ggcode, another CLI, desktop app, IDE bridge)
-                             |
-                             | Prompt / PromptStream
-                             v
-                    +-------------------+
-                    |   ClientManager   |
-                    |  discovery +      |
-                    |  shared settings  |
-                    +---------+---------+
+                    acp-go CLI / host integration
                               |
-                              v
-                    +-------------------+
-                    |      Client       |
-                    | process lifecycle |
-                    | prompt execution  |
-                    | event aggregation |
-                    +---------+---------+
-                              |
-                              v
-                    +-------------------+
-                    |    Transport      |
-                    | JSON-RPC over     |
-                    | stdio             |
-                    +---------+---------+
-                              |
-                              v
-                    ACP-compatible agent CLI
-         (copilot / droid / opencode / ggcode acp / ...)
+          +-------------------+-------------------+
+          |                                       |
+          v                                       v
+  RuntimeManager                         Config / Flow runner
+  session lifecycle                      command defaults
+  history + exports                      JSON flow execution
+  queue-aware prompt execution
+          |
+          v
+  +-------------------+      +-------------------+      +-------------------+
+  |   SessionStore    |      |   HistoryStore    |      |    QueueStore     |
+  | sessions/*.json   |      | history/*.ndjson  |      | queue/**/*.json   |
+  +-------------------+      +-------------------+      +-------------------+
+          |
+          v
+     AgentRegistry  ->  Client  ->  Transport(JSON-RPC over stdio)  ->  ACP CLI
 ```
 
-## Layers
+## Layer breakdown
 
-### 1. Discovery
+### 1. Agent registry and discovery
 
-`discovery.go` contains the known agent table and PATH scanning logic.
+`discovery.go` and `registry.go` define:
 
-Responsibilities:
+- built-in launch definitions
+- alias resolution
+- PATH-based installed-agent discovery
+- runtime override injection
 
-- define built-in ACP-capable CLI targets
-- resolve installed binaries from PATH
-- reject unsafe/local workspace-relative binaries
-- expose `Discover()` and `DiscoverWithDefs(...)`
+The registry uses richer launch metadata than the original extraction pass:
 
-This layer is intentionally simple and host-agnostic.
+- `command`
+- `args`
+- `checkBinaries`
+- `aliases`
+- optional session support hints
 
-### Supported built-in CLI targets
+That shape is what lets the runtime model both native ACP CLIs and package-exec style launchers.
 
-| Agent name | Binary | Command argv | Kind |
-| --- | --- | --- | --- |
-| `copilot` | `copilot` | `["agent"]` | native ACP CLI |
-| `droid` | `droid` | `["acp"]` | native ACP CLI |
-| `opencode` | `opencode` | `["acp"]` | native ACP CLI |
-| `ggcode` | `ggcode` | `["acp"]` | ggcode-hosted ACP server |
+### 2. ACP client layer
 
-### 2. Client manager
+`client.go`, `transport.go`, and `types.go` provide the ACP wire/runtime implementation:
 
-`client_manager.go` is the shared entry point for most hosts.
+- process startup and teardown
+- `initialize`
+- `session/new`
+- `session/resume`
+- `session/list`
+- `session/set_mode`
+- `session/set_config`
+- `session/prompt`
+- `session/cancel`
+- `session/close`
 
-Responsibilities:
+The client layer remains reusable on its own for hosts that only want ACP transport + prompt streaming.
 
-- hold discovered agents
-- carry the shared working directory and permission policy
-- create per-agent clients on demand
-- apply shared approval handlers and MCP configuration
+### 3. Product runtime layer
 
-The manager is stateful enough to carry common settings, but it does not own UI concerns.
-
-### 3. Client runtime
-
-`client.go` is the core runtime.
-
-Responsibilities:
-
-- start the agent process
-- initialize ACP
-- create/load sessions
-- send prompts
-- stream prompt updates
-- aggregate final prompt results
-- surface timeout/process diagnostics
-- translate ACP permission requests into host callbacks
-
-This is the main extracted value from ggcode.
-
-### 4. Transport and protocol types
-
-`transport.go` and `types.go` implement the ACP wire-level contract.
+`manager.go` is the higher-level facade that sits on top of the client.
 
 Responsibilities:
 
-- JSON-RPC request/response/notification IO
-- ACP request/response/update structs
-- protocol constants used by both client and host integrations
+- ensure or discover durable sessions
+- map scoped `(agent, cwd, name)` identities to persistent records
+- reconnect/resume sessions on demand
+- run prompt turns and persist outcome metadata
+- close, export, import, prune, and inspect sessions
+- expose a normalized runtime status surface
 
-These are reusable by both the standalone client and any higher-level adapter.
+This is the main bridge from “ACP client library” to “headless product/runtime”.
 
-## Protocol boundary
+### 4. Durable stores
 
-The library currently implements the **client side** of ACP using **JSON-RPC 2.0 over stdio**.
+The runtime persists state through file-backed stores:
 
-### Protocol surfaces actively used by the runtime
+- `store.go` → session metadata
+- `history.go` → append-only turn/event history
+- `queue.go` → queued prompt requests and owner leases
+- `config_store.go` → CLI defaults
 
-| Surface | Direction | Purpose |
-| --- | --- | --- |
-| `initialize` | client -> agent | negotiate protocol/capabilities |
-| `session/new` | client -> agent | create a new session |
-| `session/load` | client -> agent | restore an existing session when available |
-| `session/prompt` | client -> agent | execute a prompt |
-| `session/cancel` | client -> agent | stop an in-flight prompt |
-| `session/close` | client -> agent | close the session during teardown |
-| `session/request_permission` | agent -> client | ask the host for approval |
-| `session/update` | agent -> client | stream text/tool updates |
+These stores are intentionally simple JSON/NDJSON files so they are:
 
-### Event projection exposed by the library
+- inspectable by users
+- easy to back up or export
+- easy to extend without adding an embedded database dependency
 
-Internally ACP may carry richer update payloads, but the exported host-facing projection is:
+### 5. Queue owner model
 
-- `text`
+The current queue model is file-backed and process-owned:
+
+- `prompt --wait=false` writes a queued request
+- the CLI spawns an `internal-owner` background worker when needed
+- the owner acquires a per-session lease
+- queued prompts are drained sequentially
+- `cancel` marks queued/running requests and forwards a best-effort session cancel
+
+This keeps no-wait execution durable across short-lived CLI invocations without requiring a long-running daemon install step.
+
+### 6. CLI layer
+
+`cmd/acp-go/main.go` exposes the runtime through commands for:
+
+- prompt execution
+- one-shot exec
+- status/cancel
+- session management
+- config defaults
+- agent listing
+- flow execution
+
+The CLI is intentionally thin: command handlers mostly resolve config/flags and then call the runtime layer.
+
+## Data model
+
+### Session record
+
+Each session record keeps:
+
+- logical session key
+- record id
+- agent + cwd + name
+- remote ACP session id
+- mode/config metadata
+- last prompt / stop reason / summary / error
+- queue owner / active request metadata
+- timestamps and close state
+
+### History entry
+
+Each history entry stores:
+
+- timestamp
+- kind (`prompt`, `text`, `tool_call`, `tool_result`, `message`, ...)
+- role
+- text/tool fields
+
+### Queue request
+
+Each queued prompt stores:
+
+- request id
+- prompt text
+- status (`queued`, `running`, `completed`, `failed`, `cancelled`)
+- cancel intent
+- timestamps
+- final text / stop reason / error
+
+## Current protocol projection
+
+The host-facing streamed runtime event model stays intentionally compact:
+
+- `text_delta`
 - `tool_call`
 - `tool_result`
+- `status`
 
-That is a deliberate design choice: the standalone runtime owns ACP parsing, while the host owns the final UI model.
+The runtime keeps ACP-specific wire handling inside the client layer and exposes a stable higher-level event projection to callers.
 
-### 5. Host hooks
+## Why the package is split this way
 
-The library exposes three small host seams:
+The earlier extraction only solved the bottom layer.
 
-- `PermissionPolicy`
-- approval callback
-- optional logger
+That was insufficient for parity with a headless ACP runtime because the product features actually depend on:
 
-This is deliberate. The host should own:
+- durable session identity
+- replayable history
+- queueing across invocations
+- config defaults
+- session-scoped controls
+- a standalone command surface
 
-- approval UX
-- UI rendering
-- tool/event formatting policy beyond the raw streamed event
-- how prompt events are persisted or replayed
-
-## Why ggcode still keeps server-side ACP code locally
-
-The ACP server side inside ggcode is not just transport glue. It is tightly coupled to:
-
-- ggcode's tool registry
-- ggcode's session model
-- ggcode's permission UX
-- ggcode's ask_user behavior
-- ggcode's session persistence and projection rules
-
-That makes it a poor first extraction target. The client/runtime layer, by contrast, is broadly reusable.
-
-## ggcode integration boundary
-
-Inside ggcode, the dependency split is:
-
-```text
-ggcode/internal/acp          -> ACP server / handler / auth / session host
-ggcode/internal/acpclient    -> adapter from ggcode-acp-go to ggcode tool interfaces
-github.com/topcheer/ggcode-acp-go -> reusable ACP client/runtime/discovery library
-```
-
-This keeps the library reusable while avoiding a risky rewrite of ggcode's host-side ACP behavior.
-
-## Event model
-
-The standalone library streams a minimal event model:
-
-- `text`
-- `tool_call`
-- `tool_result`
-
-That model is intentionally close to ggcode's delegate rendering needs, so hosts can either:
-
-- render those events directly, or
-- translate them into a richer local format
-
-## Permission model
-
-The standalone library uses a smaller permission surface than ggcode:
-
-```go
-type PermissionPolicy interface {
-	Check(toolName string, input json.RawMessage) (Decision, error)
-	AllowedPathForTool(toolName, path string) bool
-}
-```
-
-That keeps the reusable boundary narrow. Richer host policies can be adapted down into this surface.
-
-## Non-goals for v1
-
-Version 1 does not try to:
-
-- extract ggcode's ACP server implementation
-- standardize UI rendering across hosts
-- reimplement ggcode's tool registry
-- own third-party host integration policy beyond basic discovery/runtime hooks
-
-Those can be layered on top once the reusable client/runtime boundary is proven stable.
+The current architecture keeps the reusable ACP mechanics separate while adding those higher-level features as composable layers on top.

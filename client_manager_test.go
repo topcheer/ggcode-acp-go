@@ -91,13 +91,16 @@ func TestErrAgentNotFound(t *testing.T) {
 func TestClientGetWithoutStart(t *testing.T) {
 	agent := DiscoveredAgent{
 		Def: AgentDef{
-			Name:        "test",
-			Title:       "Test",
-			Binaries:    []string{"test"},
-			ACPCommand:  []string{"--acp"},
-			Description: "Test agent",
+			Name:          "test",
+			Title:         "Test",
+			Command:       "test",
+			CheckBinaries: []string{"test"},
+			Args:          []string{"--acp"},
+			Description:   "Test agent",
 		},
-		Path: "/nonexistent/binary",
+		Path:    "/nonexistent/binary",
+		Command: "/nonexistent/binary",
+		Args:    []string{"--acp"},
 	}
 
 	client := NewClient(agent, t.TempDir(), nil, nil)

@@ -138,6 +138,41 @@ func TestRequestPermissionRequestUnmarshalAcceptsObjectRawInput(t *testing.T) {
 	}
 }
 
+func TestRequestPermissionRequestUnmarshalAcceptsToolCallContentArray(t *testing.T) {
+	var req RequestPermissionRequest
+	err := json.Unmarshal([]byte(`{
+		"sessionId":"session-1",
+		"toolCall":{
+			"toolCallId":"call-1",
+			"title":"Writing hello.txt",
+			"kind":"edit",
+			"status":"pending",
+			"content":[
+				{
+					"type":"diff",
+					"path":"/tmp/hello.txt",
+					"oldText":"",
+					"newText":"hello"
+				}
+			],
+			"rawInput":{"file_path":"/tmp/hello.txt","content":"hello"}
+		},
+		"options":[{"optionId":"allow-once","kind":"allow_once"}]
+	}`), &req)
+	if err != nil {
+		t.Fatalf("unmarshal permission request with content array: %v", err)
+	}
+	if req.ToolCall == nil || req.ToolCall.Content == nil {
+		t.Fatal("expected toolCall content")
+	}
+	if req.ToolCall.Content.Type != "diff" {
+		t.Fatalf("expected diff content, got %+v", req.ToolCall.Content)
+	}
+	if req.ToolCall.Content.Diff == nil || req.ToolCall.Content.Diff.Path != "/tmp/hello.txt" {
+		t.Fatalf("expected diff path to be preserved, got %+v", req.ToolCall.Content.Diff)
+	}
+}
+
 func TestPermissionRequestResponseFallsBackToAllowOptionIDWithoutKind(t *testing.T) {
 	policy := NewConfigPolicyWithMode(map[string]Decision{}, nil, BypassMode)
 	client := NewClient(DiscoveredAgent{Def: AgentDef{Name: "copilot"}}, t.TempDir(), policy, nil)
@@ -159,6 +194,42 @@ func TestPermissionRequestResponseFallsBackToAllowOptionIDWithoutKind(t *testing
 	}
 	if resp.Outcome.Outcome != "selected" || resp.Outcome.SelectedOption == nil || resp.Outcome.SelectedOption.OptionID != "allow" {
 		t.Fatalf("expected optionId fallback to select allow, got %+v", resp.Outcome)
+	}
+}
+
+func TestPermissionRequestResponseEmitsEscalationWhenApprovalIsNeeded(t *testing.T) {
+	policy := NewConfigPolicyWithMode(map[string]Decision{}, nil, SupervisedMode)
+	client := NewClient(DiscoveredAgent{Def: AgentDef{Name: "copilot"}}, t.TempDir(), policy, nil)
+	rawInput := json.RawMessage(`{"command":"make test"}`)
+	var event PermissionEscalationEvent
+	client.SetPermissionEscalationHandler(func(value PermissionEscalationEvent) {
+		event = value
+	})
+	client.SetApprovalHandler(func(_ context.Context, toolName string, input string) Decision {
+		return Allow
+	})
+
+	_, err := client.permissionRequestResponse(context.Background(), RequestPermissionRequest{
+		SessionID: "session-1",
+		ToolCall: &ToolCallUpdate{
+			ToolCallID: "call-1",
+			Kind:       ToolKindExecute,
+			Title:      "Run build",
+			RawInput:   rawInput,
+		},
+		Options: []PermissionOption{
+			{OptionID: "allow-once", Kind: PermissionOptionAllowOnce},
+			{OptionID: "allow-always", Kind: PermissionOptionAllowAlways},
+		},
+	}, rawInput)
+	if err != nil {
+		t.Fatalf("permissionRequestResponse error: %v", err)
+	}
+	if event.Type != "permission_escalation" || event.SessionID != "session-1" || event.ToolCallID != "call-1" {
+		t.Fatalf("unexpected escalation event: %#v", event)
+	}
+	if event.ToolTitle != "Run build" || string(event.ToolInput) != string(rawInput) {
+		t.Fatalf("unexpected escalation payload: %#v", event)
 	}
 }
 

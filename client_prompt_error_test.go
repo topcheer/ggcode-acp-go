@@ -20,10 +20,13 @@ func TestPromptReturnsTransportParseErrorInsteadOfTimingOut(t *testing.T) {
 	client := NewClient(
 		DiscoveredAgent{
 			Def: AgentDef{
-				Name:       "prompt-malformed-helper",
-				ACPCommand: []string{"-test.run=TestACPPromptMalformedHelperProcess", "--"},
+				Name:    "prompt-malformed-helper",
+				Command: exe,
+				Args:    []string{"-test.run=TestACPPromptMalformedHelperProcess", "--"},
 			},
-			Path: exe,
+			Path:    exe,
+			Command: exe,
+			Args:    []string{"-test.run=TestACPPromptMalformedHelperProcess", "--"},
 		},
 		t.TempDir(),
 		nil,

@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -131,11 +132,11 @@ func TestKnownAgentsStructure(t *testing.T) {
 		if def.Title == "" {
 			t.Errorf("AgentDef %q has empty Title", def.Name)
 		}
-		if len(def.Binaries) == 0 {
-			t.Errorf("AgentDef %q has no Binaries", def.Name)
+		if def.Command == "" {
+			t.Errorf("AgentDef %q has no Command", def.Name)
 		}
-		if len(def.ACPCommand) == 0 {
-			t.Errorf("AgentDef %q has no ACPCommand", def.Name)
+		if len(def.CheckBinaries) == 0 {
+			t.Errorf("AgentDef %q has no CheckBinaries", def.Name)
 		}
 		if names[def.Name] {
 			t.Errorf("duplicate agent name: %q", def.Name)
@@ -143,10 +144,72 @@ func TestKnownAgentsStructure(t *testing.T) {
 		names[def.Name] = true
 	}
 
-	expected := []string{"copilot", "droid", "ggcode", "opencode"}
+	expected := []string{"claude", "codex", "copilot", "cursor", "droid", "fast-agent", "gemini", "ggcode", "kimi", "kilocode", "kiro", "opencode", "pi", "qoder", "qwen", "trae"}
 	for _, name := range expected {
 		if !names[name] {
 			t.Errorf("expected agent %q in KnownAgents", name)
 		}
 	}
+}
+
+func TestKiloCodeLaunchUsesAcpCapablePackage(t *testing.T) {
+	for _, def := range KnownAgents {
+		if def.Name != "kilocode" {
+			continue
+		}
+		if len(def.Args) < 2 || def.Args[1] != "@kilocode/cli@rc" {
+			t.Fatalf("expected kilocode package exec to pin @kilocode/cli@rc, got %v", def.Args)
+		}
+		return
+	}
+	t.Fatal("kilocode agent definition not found")
+}
+
+func TestCursorLaunchPrefersOfficialAgentBinary(t *testing.T) {
+	for _, def := range KnownAgents {
+		if def.Name != "cursor" {
+			continue
+		}
+		if def.Command != "agent" {
+			t.Fatalf("expected cursor command to prefer agent, got %q", def.Command)
+		}
+		if len(def.CheckBinaries) < 2 || def.CheckBinaries[0] != "agent" || def.CheckBinaries[1] != "cursor-agent" {
+			t.Fatalf("expected cursor binary search order [agent cursor-agent], got %v", def.CheckBinaries)
+		}
+		return
+	}
+	t.Fatal("cursor agent definition not found")
+}
+
+func TestKiroLaunchPrefersOfficialCLIName(t *testing.T) {
+	for _, def := range KnownAgents {
+		if def.Name != "kiro" {
+			continue
+		}
+		if def.Command != "kiro-cli" {
+			t.Fatalf("expected kiro command to prefer kiro-cli, got %q", def.Command)
+		}
+		if len(def.CheckBinaries) < 2 || def.CheckBinaries[0] != "kiro-cli" || def.CheckBinaries[1] != "kiro-cli-chat" {
+			t.Fatalf("expected kiro binary search order [kiro-cli kiro-cli-chat], got %v", def.CheckBinaries)
+		}
+		return
+	}
+	t.Fatal("kiro agent definition not found")
+}
+
+func TestDroidLaunchUsesFactoryStreamJSONRPC(t *testing.T) {
+	for _, def := range KnownAgents {
+		if def.Name != "droid" {
+			continue
+		}
+		if def.WireProtocol != WireProtocolFactoryJSONRPC {
+			t.Fatalf("expected droid wire protocol %q, got %q", WireProtocolFactoryJSONRPC, def.WireProtocol)
+		}
+		expected := []string{"exec", "--input-format", "stream-jsonrpc", "--output-format", "stream-jsonrpc"}
+		if strings.Join(def.Args, " ") != strings.Join(expected, " ") {
+			t.Fatalf("expected droid args %v, got %v", expected, def.Args)
+		}
+		return
+	}
+	t.Fatal("droid agent definition not found")
 }

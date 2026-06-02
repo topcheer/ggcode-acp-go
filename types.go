@@ -1,6 +1,12 @@
 package acp
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+)
 
 // ---------------------------------------------------------------------------
 // JSON-RPC 2.0 base types
@@ -146,6 +152,95 @@ type AuthMethod struct {
 	Env         []EnvVariable   `json:"env,omitempty"`
 }
 
+func (m *AuthMethod) UnmarshalJSON(data []byte) error {
+	type authMethodWire struct {
+		Meta        json.RawMessage `json:"_meta,omitempty"`
+		ID          string          `json:"id"`
+		Name        string          `json:"name"`
+		Description string          `json:"description,omitempty"`
+		Type        string          `json:"type,omitempty"`
+		Vars        []AuthEnvVar    `json:"vars,omitempty"`
+		Link        string          `json:"link,omitempty"`
+		Args        []string        `json:"args,omitempty"`
+		Env         json.RawMessage `json:"env,omitempty"`
+	}
+
+	var wire authMethodWire
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	env, err := unmarshalEnvVariables(wire.Env)
+	if err != nil {
+		return err
+	}
+	*m = AuthMethod{
+		Meta:        wire.Meta,
+		ID:          wire.ID,
+		Name:        wire.Name,
+		Description: wire.Description,
+		Type:        wire.Type,
+		Vars:        wire.Vars,
+		Link:        wire.Link,
+		Args:        wire.Args,
+		Env:         env,
+	}
+	return nil
+}
+
+func unmarshalEnvVariables(data json.RawMessage) ([]EnvVariable, error) {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, nil
+	}
+
+	var env []EnvVariable
+	if err := json.Unmarshal(trimmed, &env); err == nil {
+		return env, nil
+	}
+
+	var envMap map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &envMap); err != nil {
+		return nil, err
+	}
+	if len(envMap) == 0 {
+		return nil, nil
+	}
+
+	keys := make([]string, 0, len(envMap))
+	for key := range envMap {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	env = make([]EnvVariable, 0, len(keys))
+	for _, key := range keys {
+		raw := bytes.TrimSpace(envMap[key])
+		if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+			env = append(env, EnvVariable{Name: key})
+			continue
+		}
+
+		var item EnvVariable
+		if err := json.Unmarshal(raw, &item); err == nil && (item.Name != "" || item.Value != "" || len(item.Meta) > 0) {
+			if item.Name == "" {
+				item.Name = key
+			}
+			env = append(env, item)
+			continue
+		}
+
+		var value string
+		if err := json.Unmarshal(raw, &value); err == nil {
+			env = append(env, EnvVariable{Name: key, Value: value})
+			continue
+		}
+
+		return nil, fmt.Errorf("unsupported auth env entry for %q", key)
+	}
+
+	return env, nil
+}
+
 type AuthEnvVar struct {
 	Meta     json.RawMessage `json:"_meta,omitempty"`
 	Name     string          `json:"name"`
@@ -233,7 +328,16 @@ type ResumeSessionRequest struct {
 	Meta       json.RawMessage `json:"_meta,omitempty"`
 	SessionID  string          `json:"sessionId"`
 	CWD        string          `json:"cwd,omitempty"`
-	MCPServers []MCPServer     `json:"mcpServers,omitempty"`
+	MCPServers []MCPServer     `json:"mcpServers"`
+}
+
+func (r ResumeSessionRequest) MarshalJSON() ([]byte, error) {
+	type alias ResumeSessionRequest
+	aux := alias(r)
+	if aux.MCPServers == nil {
+		aux.MCPServers = []MCPServer{}
+	}
+	return json.Marshal(aux)
 }
 
 // ResumeSessionResponse returns session info after resume.
@@ -273,6 +377,18 @@ type SetSessionModeRequest struct {
 
 // SetSessionModeResponse is the response for set_mode.
 type SetSessionModeResponse struct {
+	Meta json.RawMessage `json:"_meta,omitempty"`
+}
+
+// SetSessionModelRequest changes the active session model.
+type SetSessionModelRequest struct {
+	Meta      json.RawMessage `json:"_meta,omitempty"`
+	SessionID string          `json:"sessionId"`
+	ModelID   string          `json:"modelId"`
+}
+
+// SetSessionModelResponse is the response for set_model.
+type SetSessionModelResponse struct {
 	Meta json.RawMessage `json:"_meta,omitempty"`
 }
 
@@ -456,6 +572,39 @@ type SessionUpdate struct {
 
 	// Plan fields
 	Plan *Plan `json:"plan,omitempty"`
+
+	hasContent   bool
+	hasToolCall  bool
+	hasTitle     bool
+	hasKind      bool
+	hasStatus    bool
+	hasLocations bool
+	hasRawInput  bool
+	hasRawOutput bool
+	hasPlan      bool
+}
+
+func (u *SessionUpdate) UnmarshalJSON(data []byte) error {
+	type alias SessionUpdate
+	var decoded alias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*u = SessionUpdate(decoded)
+	_, u.hasContent = raw["content"]
+	_, u.hasToolCall = raw["toolCallId"]
+	_, u.hasTitle = raw["title"]
+	_, u.hasKind = raw["kind"]
+	_, u.hasStatus = raw["status"]
+	_, u.hasLocations = raw["locations"]
+	_, u.hasRawInput = raw["rawInput"]
+	_, u.hasRawOutput = raw["rawOutput"]
+	_, u.hasPlan = raw["plan"]
+	return nil
 }
 
 // Session update type constants.
@@ -523,6 +672,41 @@ type ToolCallUpdate struct {
 	Locations  []ToolCallLocation `json:"locations,omitempty"`
 }
 
+func (u *ToolCallUpdate) UnmarshalJSON(data []byte) error {
+	type toolCallUpdateWire struct {
+		Meta       json.RawMessage    `json:"_meta,omitempty"`
+		ToolCallID ToolCallId         `json:"toolCallId"`
+		Title      string             `json:"title,omitempty"`
+		Kind       ToolKind           `json:"kind,omitempty"`
+		Status     ToolCallStatus     `json:"status,omitempty"`
+		Content    json.RawMessage    `json:"content,omitempty"`
+		RawInput   json.RawMessage    `json:"rawInput,omitempty"`
+		RawOutput  json.RawMessage    `json:"rawOutput,omitempty"`
+		Locations  []ToolCallLocation `json:"locations,omitempty"`
+	}
+
+	var wire toolCallUpdateWire
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	content, err := unmarshalToolCallContent(wire.Content)
+	if err != nil {
+		return err
+	}
+	*u = ToolCallUpdate{
+		Meta:       wire.Meta,
+		ToolCallID: wire.ToolCallID,
+		Title:      wire.Title,
+		Kind:       wire.Kind,
+		Status:     wire.Status,
+		Content:    content,
+		RawInput:   wire.RawInput,
+		RawOutput:  wire.RawOutput,
+		Locations:  wire.Locations,
+	}
+	return nil
+}
+
 // ToolCallContent wraps tool call output content (standard content or diff).
 type ToolCallContent struct {
 	Meta json.RawMessage `json:"_meta,omitempty"`
@@ -533,6 +717,51 @@ type ToolCallContent struct {
 	Diff *Diff `json:"diff,omitempty"`
 	// Terminal fields
 	TerminalID string `json:"terminalId,omitempty"`
+}
+
+func unmarshalToolCallContent(data json.RawMessage) (*ToolCallContent, error) {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, nil
+	}
+
+	var direct ToolCallContent
+	if err := json.Unmarshal(trimmed, &direct); err == nil && strings.TrimSpace(direct.Type) != "" {
+		return &direct, nil
+	}
+
+	var entries []ToolCallContentEntry
+	if err := json.Unmarshal(trimmed, &entries); err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
+
+	entry := entries[0]
+	content := &ToolCallContent{Meta: entry.Meta}
+	switch entry.Type {
+	case "content":
+		if entry.Content != nil {
+			content.Type = entry.Content.Type
+			content.Text = entry.Content.Text
+		} else {
+			content.Type = "content"
+		}
+	case "diff":
+		content.Type = "diff"
+		content.Diff = &Diff{
+			Path:    entry.Path,
+			OldText: entry.OldText,
+			NewText: entry.NewText,
+		}
+	case "terminal":
+		content.Type = "terminal"
+		content.TerminalID = entry.TerminalID
+	default:
+		content.Type = entry.Type
+	}
+	return content, nil
 }
 
 // ToolCallLocation tracks file locations accessed by tools.
@@ -626,6 +855,20 @@ type RequestPermissionRequest struct {
 type RequestPermissionResponse struct {
 	Meta    json.RawMessage          `json:"_meta,omitempty"`
 	Outcome RequestPermissionOutcome `json:"outcome"`
+}
+
+type PermissionEscalationEvent struct {
+	Type        string          `json:"type"`
+	SessionID   string          `json:"sessionId"`
+	ToolCallID  string          `json:"toolCallId"`
+	ToolName    string          `json:"toolName,omitempty"`
+	ToolTitle   string          `json:"toolTitle"`
+	ToolInput   json.RawMessage `json:"toolInput,omitempty"`
+	ToolKind    ToolKind        `json:"toolKind,omitempty"`
+	Action      string          `json:"action"`
+	MatchedRule string          `json:"matchedRule,omitempty"`
+	Message     string          `json:"message"`
+	Timestamp   string          `json:"timestamp"`
 }
 
 // RequestPermissionOutcome is a discriminated union.

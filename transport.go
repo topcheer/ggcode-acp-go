@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,26 +16,55 @@ import (
 // Supports bi-directional communication: both responding to Client requests
 // and sending Agent→Client requests (e.g. session/request_permission, fs/read_text_file).
 type Transport struct {
-	Scanner *bufio.Scanner
-	Writer  io.Writer
-	mu      sync.Mutex
+	Scanner      *bufio.Scanner
+	Writer       io.Writer
+	mu           sync.Mutex
+	rawMu        sync.RWMutex
+	rawHook      func(json.RawMessage)
+	wireProtocol WireProtocol
 
 	// Bi-directional request support
 	nextID    atomic.Int64
-	pending   map[int64]chan *JSONRPCResponse
+	pending   map[string]chan *JSONRPCResponse
 	pendingMu sync.Mutex
 }
 
 // NewTransport creates a new Transport reading from r and writing to w.
 func NewTransport(r io.Reader, w io.Writer) *Transport {
+	return NewTransportWithProtocol(r, w, WireProtocolACP)
+}
+
+// NewTransportWithProtocol creates a new transport configured for the given wire protocol.
+func NewTransportWithProtocol(r io.Reader, w io.Writer, protocol WireProtocol) *Transport {
 	s := bufio.NewScanner(r)
 	// Copilot ACP can emit large single-line NDJSON payloads for tool results.
 	s.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
 	return &Transport{
-		Scanner: s,
-		Writer:  w,
-		pending: make(map[int64]chan *JSONRPCResponse),
+		Scanner:      s,
+		Writer:       w,
+		pending:      make(map[string]chan *JSONRPCResponse),
+		wireProtocol: normalizeWireProtocol(protocol),
 	}
+}
+
+func (t *Transport) SetRawMessageObserver(hook func(json.RawMessage)) {
+	t.rawMu.Lock()
+	defer t.rawMu.Unlock()
+	t.rawHook = hook
+}
+
+func (t *Transport) emitRawMessage(line []byte) {
+	if len(line) == 0 {
+		return
+	}
+	t.rawMu.RLock()
+	hook := t.rawHook
+	t.rawMu.RUnlock()
+	if hook == nil {
+		return
+	}
+	raw := append(json.RawMessage(nil), line...)
+	hook(raw)
 }
 
 // WriteRaw writes a raw byte slice to the transport followed by a newline.
@@ -122,6 +152,7 @@ func (t *Transport) ReadAnyMessage() (*JSONRPCRequest, *JSONRPCResponse, error) 
 		if err := json.Unmarshal(line, &req); err != nil {
 			return nil, nil, fmt.Errorf("parsing JSON-RPC request: %w", err)
 		}
+		t.emitRawMessage(line)
 		return &req, nil, nil
 	}
 
@@ -134,6 +165,7 @@ func (t *Transport) ReadAnyMessage() (*JSONRPCRequest, *JSONRPCResponse, error) 
 	if rawResult, ok := raw["result"]; ok {
 		resp.RawResult = rawResult
 	}
+	t.emitRawMessage(line)
 	return nil, &resp, nil
 }
 
@@ -142,28 +174,41 @@ func (t *Transport) ReadAnyMessage() (*JSONRPCRequest, *JSONRPCResponse, error) 
 // Returns the raw response result or an error.
 func (t *Transport) SendRequest(method string, params interface{}, timeout time.Duration) (json.RawMessage, error) {
 	id := t.nextID.Add(1)
+	requestID := interface{}(id)
+	pendingKey := strconv.FormatInt(id, 10)
+	if t.isFactoryProtocol() {
+		requestID = pendingKey
+	}
 
 	// Register pending response channel before sending
 	ch := make(chan *JSONRPCResponse, 1)
 	t.pendingMu.Lock()
-	t.pending[id] = ch
+	t.pending[pendingKey] = ch
 	t.pendingMu.Unlock()
 	defer func() {
 		t.pendingMu.Lock()
-		delete(t.pending, id)
+		delete(t.pending, pendingKey)
 		t.pendingMu.Unlock()
 	}()
 
 	// Build and send request
 	req := struct {
-		JSONRPC string          `json:"jsonrpc"`
-		ID      int64           `json:"id"`
-		Method  string          `json:"method"`
-		Params  json.RawMessage `json:"params,omitempty"`
+		JSONRPC                string          `json:"jsonrpc"`
+		FactoryAPIVersion      string          `json:"factoryApiVersion,omitempty"`
+		FactoryProtocolVersion string          `json:"factoryProtocolVersion,omitempty"`
+		Type                   string          `json:"type,omitempty"`
+		ID                     interface{}     `json:"id"`
+		Method                 string          `json:"method"`
+		Params                 json.RawMessage `json:"params,omitempty"`
 	}{
 		JSONRPC: "2.0",
-		ID:      id,
+		ID:      requestID,
 		Method:  method,
+	}
+	if t.isFactoryProtocol() {
+		req.FactoryAPIVersion = factoryAPIVersion
+		req.FactoryProtocolVersion = factoryProtocolVersion
+		req.Type = "request"
 	}
 	if params != nil {
 		raw, err := json.Marshal(params)
@@ -201,17 +246,8 @@ func (t *Transport) DeliverResponse(resp *JSONRPCResponse) {
 	if resp.ID == nil {
 		return
 	}
-
-	// Convert ID to int64 for pending map lookup
-	var id int64
-	switch v := resp.ID.(type) {
-	case float64:
-		id = int64(v)
-	case int:
-		id = int64(v)
-	case int64:
-		id = v
-	default:
+	id, ok := transportResponseIDKey(resp.ID)
+	if !ok {
 		return
 	}
 
@@ -226,17 +262,36 @@ func (t *Transport) DeliverResponse(resp *JSONRPCResponse) {
 
 // WriteResponse writes a JSON-RPC response with the given result.
 func (t *Transport) WriteResponse(id RequestID, result interface{}) error {
-	resp := JSONRPCResponse{
+	resp := struct {
+		JSONRPC                string      `json:"jsonrpc"`
+		FactoryAPIVersion      string      `json:"factoryApiVersion,omitempty"`
+		FactoryProtocolVersion string      `json:"factoryProtocolVersion,omitempty"`
+		Type                   string      `json:"type,omitempty"`
+		ID                     RequestID   `json:"id"`
+		Result                 interface{} `json:"result,omitempty"`
+	}{
 		JSONRPC: "2.0",
 		ID:      id,
 		Result:  result,
+	}
+	if t.isFactoryProtocol() {
+		resp.FactoryAPIVersion = factoryAPIVersion
+		resp.FactoryProtocolVersion = factoryProtocolVersion
+		resp.Type = "response"
 	}
 	return t.writeJSON(resp)
 }
 
 // WriteError writes a JSON-RPC error response.
 func (t *Transport) WriteError(id RequestID, code int, msg string) error {
-	resp := JSONRPCResponse{
+	resp := struct {
+		JSONRPC                string        `json:"jsonrpc"`
+		FactoryAPIVersion      string        `json:"factoryApiVersion,omitempty"`
+		FactoryProtocolVersion string        `json:"factoryProtocolVersion,omitempty"`
+		Type                   string        `json:"type,omitempty"`
+		ID                     RequestID     `json:"id"`
+		Error                  *JSONRPCError `json:"error,omitempty"`
+	}{
 		JSONRPC: "2.0",
 		ID:      id,
 		Error: &JSONRPCError{
@@ -244,26 +299,54 @@ func (t *Transport) WriteError(id RequestID, code int, msg string) error {
 			Message: msg,
 		},
 	}
+	if t.isFactoryProtocol() {
+		resp.FactoryAPIVersion = factoryAPIVersion
+		resp.FactoryProtocolVersion = factoryProtocolVersion
+		resp.Type = "response"
+	}
 	return t.writeJSON(resp)
 }
 
 // WriteErrorNilID writes a JSON-RPC error response with a nil ID.
 func (t *Transport) WriteErrorNilID(code int, msg string) error {
-	resp := JSONRPCResponse{
+	resp := struct {
+		JSONRPC                string        `json:"jsonrpc"`
+		FactoryAPIVersion      string        `json:"factoryApiVersion,omitempty"`
+		FactoryProtocolVersion string        `json:"factoryProtocolVersion,omitempty"`
+		Type                   string        `json:"type,omitempty"`
+		Error                  *JSONRPCError `json:"error,omitempty"`
+	}{
 		JSONRPC: "2.0",
 		Error: &JSONRPCError{
 			Code:    code,
 			Message: msg,
 		},
 	}
+	if t.isFactoryProtocol() {
+		resp.FactoryAPIVersion = factoryAPIVersion
+		resp.FactoryProtocolVersion = factoryProtocolVersion
+		resp.Type = "response"
+	}
 	return t.writeJSON(resp)
 }
 
 // WriteNotification writes a JSON-RPC notification (no ID).
 func (t *Transport) WriteNotification(method string, params interface{}) error {
-	notif := JSONRPCNotification{
+	notif := struct {
+		JSONRPC                string          `json:"jsonrpc"`
+		FactoryAPIVersion      string          `json:"factoryApiVersion,omitempty"`
+		FactoryProtocolVersion string          `json:"factoryProtocolVersion,omitempty"`
+		Type                   string          `json:"type,omitempty"`
+		Method                 string          `json:"method"`
+		Params                 json.RawMessage `json:"params,omitempty"`
+	}{
 		JSONRPC: "2.0",
 		Method:  method,
+	}
+	if t.isFactoryProtocol() {
+		notif.FactoryAPIVersion = factoryAPIVersion
+		notif.FactoryProtocolVersion = factoryProtocolVersion
+		notif.Type = "notification"
 	}
 	if params != nil {
 		raw, err := json.Marshal(params)
@@ -273,6 +356,28 @@ func (t *Transport) WriteNotification(method string, params interface{}) error {
 		notif.Params = raw
 	}
 	return t.writeJSON(notif)
+}
+
+func (t *Transport) isFactoryProtocol() bool {
+	return normalizeWireProtocol(t.wireProtocol) == WireProtocolFactoryJSONRPC
+}
+
+func transportResponseIDKey(value interface{}) (string, bool) {
+	switch v := value.(type) {
+	case string:
+		if v == "" {
+			return "", false
+		}
+		return v, true
+	case float64:
+		return strconv.FormatInt(int64(v), 10), true
+	case int:
+		return strconv.Itoa(v), true
+	case int64:
+		return strconv.FormatInt(v, 10), true
+	default:
+		return "", false
+	}
 }
 
 // writeJSON marshals v and writes it as a single line followed by \n.
@@ -290,5 +395,6 @@ func (t *Transport) writeJSON(v interface{}) error {
 	if _, err := t.Writer.Write([]byte("\n")); err != nil {
 		return fmt.Errorf("writing newline: %w", err)
 	}
+	t.emitRawMessage(data)
 	return nil
 }

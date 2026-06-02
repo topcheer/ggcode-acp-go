@@ -25,10 +25,13 @@ func TestClientCloseDoesNotHangOnUnresponsiveSessionClose(t *testing.T) {
 	client := NewClient(
 		DiscoveredAgent{
 			Def: AgentDef{
-				Name:       "close-hang-helper",
-				ACPCommand: []string{"-test.run=TestACPUnresponsiveCloseHelperProcess", "--"},
+				Name:    "close-hang-helper",
+				Command: exe,
+				Args:    []string{"-test.run=TestACPUnresponsiveCloseHelperProcess", "--"},
 			},
-			Path: exe,
+			Path:    exe,
+			Command: exe,
+			Args:    []string{"-test.run=TestACPUnresponsiveCloseHelperProcess", "--"},
 		},
 		t.TempDir(),
 		nil,

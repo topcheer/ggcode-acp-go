@@ -1,206 +1,145 @@
 # ggcode-acp-go
 
-`ggcode-acp-go` is a standalone Go ACP client/runtime/discovery library extracted from ggcode.
+`ggcode-acp-go` is a Go implementation of an acpx-style ACP runtime.
 
-It is meant for hosts that want to talk to ACP-compatible coding agents over stdio without
-copying ggcode's full TUI, provider stack, or ACP server implementation.
+It now provides both:
+
+- a reusable Go library for ACP discovery, client lifecycle, runtime/session management, durable history, and queue storage
+- a standalone `acp-go` CLI for prompt execution, session inspection, config defaults, flow execution, and no-wait background queue processing
 
 ## What it includes
 
-- ACP JSON-RPC transport over stdio
-- client lifecycle management for ACP agents
-- agent discovery for the currently supported CLI targets
-- streaming prompt events for text, tool calls, and tool results
-- a small standalone permission policy model for non-ggcode consumers
-- a `ggcode` preset so `ggcode acp` is discoverable like other ACP-capable CLIs
+- ACP JSON-RPC 2.0 transport over stdio
+- agent discovery/registry with aliases and launch metadata
+- ACP client lifecycle, prompt streaming, resume/list/mode/config operations
+- durable file-backed session records
+- durable per-session history
+- a background queue owner for `prompt --wait=false`
+- CLI config persistence
+- a standalone `acp-go` command
+- a simple JSON-based flow runner
 
-## What it does not include
+## Built-in agent registry
 
-Version 1 intentionally focuses on the **client/runtime** side.
+The built-in registry currently knows how to launch:
 
-It does **not** include:
-
-- ggcode's ACP server/handler/auth implementation
-- ggcode's TUI/mobile/GUI rendering logic
-- ggcode's tool registry, provider stack, or session UI
-
-Those stay in ggcode itself. If you want the server-side implementation, use `ggcode acp`.
-
-## Supported discovered CLIs
-
-The built-in discovery table currently includes:
-
-| Agent name | Binary lookup | ACP command | Mode | Notes |
-| --- | --- | --- | --- | --- |
-| `copilot` | `copilot` | `copilot agent` | native ACP CLI | GitHub Copilot CLI agent mode |
-| `droid` | `droid` | `droid acp` | native ACP CLI | Droid ACP entrypoint |
-| `opencode` | `opencode` | `opencode acp` | native ACP CLI | OpenCode ACP entrypoint |
-| `ggcode` | `ggcode` | `ggcode acp` | ggcode-hosted ACP server | lets hosts talk to ggcode itself as an ACP agent |
-
-Discovery is PATH-based and returns only binaries that are actually installed and executable.
-Workspace-local binaries are rejected on purpose so discovery cannot accidentally execute a project-local shim.
-
-## Supported protocol surface
-
-`ggcode-acp-go` currently targets **ACP over JSON-RPC 2.0 on stdio**.
-
-### Transport
-
-| Layer | Supported |
+| Agent | Launch |
 | --- | --- |
-| ACP framing | JSON-RPC 2.0 |
-| Process transport | stdio |
-| Session model | per-agent ACP session |
-| Streaming | `session/update` notifications |
+| `pi` | `npx pi-acp@^0.0.26` |
+| `codex` | `npx -y @agentclientprotocol/codex-acp@^0.0.44` |
+| `claude` | `npx -y @agentclientprotocol/claude-agent-acp@^0.37.0` |
+| `gemini` | `gemini --acp` |
+| `cursor` | `agent acp` (fallback: `cursor-agent acp`) |
+| `copilot` | `copilot --acp --stdio` |
+| `droid` | `droid exec --output-format acp` |
+| `fast-agent` | `uvx fast-agent-mcp acp` |
+| `kilocode` | `npx -y @kilocode/cli acp` |
+| `kimi` | `kimi acp` |
+| `kiro` | `kiro-cli acp` (fallback: `kiro-cli-chat acp`) |
+| `opencode` | `npx -y opencode-ai acp` |
+| `qoder` | `qodercli --acp` |
+| `qwen` | `qwen --acp` |
+| `trae` | `traecli acp serve` |
+| `ggcode` | `ggcode acp` |
 
-### ACP methods/events used by the runtime
+## CLI surface
 
-| ACP surface | Role in library |
-| --- | --- |
-| `initialize` | capability / implementation handshake |
-| `session/new` | create a fresh ACP session |
-| `session/load` | reuse an existing ACP session when supported |
-| `session/prompt` | send prompts to the agent |
-| `session/cancel` | cancel an in-flight prompt |
-| `session/close` | close a session during shutdown |
-| `session/request_permission` | bridge agent-side approval requests to the host |
-| `session/update` | stream text/tool activity back to the host |
+The standalone binary lives at `cmd/acp-go`.
 
-### Streamed event model exposed to hosts
+Current commands:
 
-The public event model is intentionally compact:
+- `acp-go [agent] prompt`
+- `acp-go [agent] exec`
+- `acp-go [agent] status`
+- `acp-go [agent] cancel`
+- `acp-go sessions ensure|list|show|history|export|import|close|prune`
+- `acp-go config show|set-default-agent|set-default-session`
+- `acp-go agents`
+- `acp-go flow run`
 
-| Event | Meaning |
-| --- | --- |
-| `text` | incremental assistant text |
-| `tool_call` | tool started / declared |
-| `tool_result` | tool completed or failed |
+`prompt --wait=false` persists a queue request and starts a background owner process that drains queued prompts for the session.
 
-This matches the delegate-oriented rendering model ggcode uses internally while remaining generic enough for other hosts.
+## State layout
 
-## Package shape
+By default state lives in:
 
-The main public surface is intentionally small:
+- `$GGCODE_ACP_STATE_DIR`, if set
+- otherwise `$XDG_STATE_HOME/ggcode-acp-go`
+- otherwise `~/.ggcode-acp-go`
 
-| API | Purpose |
-| --- | --- |
-| `Discover()` / `DiscoverWithDefs(...)` | find installed ACP agents |
-| `NewClientManager(...)` | create a manager with shared working dir/policy |
-| `(*ClientManager).Available()` | list discovered agent names |
-| `(*ClientManager).Get(ctx, name)` | start and initialize a client |
-| `(*Client).Prompt(...)` | run a prompt and collect the final result |
-| `(*Client).PromptStream(...)` | stream text/tool events while collecting the final result |
-| `SetLogger(...)` | plug in host-side debug logging |
-| `NewConfigPolicyWithMode(...)` | create a small standalone permission policy |
+The runtime stores:
 
-For a deeper breakdown of the layers, see [docs/architecture.md](docs/architecture.md).
+- `sessions/*.json` for durable session records
+- `history/*.ndjson` for durable turn/event history
+- `queue/...` for queued prompt requests and owner lease metadata
+- `config.json` for CLI defaults
 
-## Standalone usage
+## Library surface
 
-```go
-package main
+The library now has two main layers:
 
-import (
-	"context"
-	"fmt"
-	"log"
-	"os"
+1. low-level ACP client/discovery APIs such as `Discover`, `ClientManager`, `Client`, and prompt streaming
+2. product-level runtime APIs such as `RuntimeManager`, `SessionStore`, `HistoryStore`, and `QueueStore`
 
-	acp "github.com/topcheer/ggcode-acp-go"
-)
+Useful entry points:
 
-func main() {
-	ctx := context.Background()
-	workspace, err := os.Getwd()
-	if err != nil {
-		log.Fatal(err)
-	}
+- `NewStaticAgentRegistry(...)`
+- `NewRuntimeManager(...)`
+- `NewFileSessionStore(...)`
+- `NewFileHistoryStore(...)`
+- `NewFileQueueStore(...)`
 
-	policy := acp.NewConfigPolicyWithMode(nil, []string{workspace}, acp.SupervisedMode)
-	manager := acp.NewClientManager(workspace, policy)
-	defer manager.CloseAll()
+## Example: direct prompt
 
-	fmt.Println("available:", manager.Available())
+```bash
+go run ./cmd/acp-go copilot prompt --text "Summarize this repository"
+```
 
-	client, err := manager.Get(ctx, "ggcode")
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer client.Close()
+## Example: persistent session
 
-	result, err := client.PromptStream(ctx, "Summarize this repository", func(event acp.PromptEvent) {
-		switch event.Type {
-		case acp.PromptEventText:
-			fmt.Print(event.Text)
-		case acp.PromptEventToolCall:
-			fmt.Printf("\n[tool] %s %s\n", event.ToolName, event.ToolArgs)
-		case acp.PromptEventToolResult:
-			fmt.Printf("\n[result] %s\n", event.Result)
-		}
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
+```bash
+go run ./cmd/acp-go copilot sessions ensure --name repo
+go run ./cmd/acp-go copilot prompt --name repo --text "Create a release checklist"
+go run ./cmd/acp-go copilot status --name repo
+go run ./cmd/acp-go copilot sessions history --name repo
+```
 
-	fmt.Printf("\n\nstop=%s\n", result.StopReason)
+## Example: queued background prompt
+
+```bash
+go run ./cmd/acp-go copilot prompt --name repo --wait=false --text "Run the next maintenance task"
+go run ./cmd/acp-go copilot status --name repo
+go run ./cmd/acp-go copilot cancel --name repo
+```
+
+## Example: flow
+
+Flow files are JSON:
+
+```json
+{
+  "agent": "copilot",
+  "name": "release-flow",
+  "steps": [
+    { "prompt": "Inspect the repository status" },
+    { "prompt": "Draft release notes" },
+    { "mode": "exec", "prompt": "Summarize open risks in one paragraph" }
+  ]
 }
 ```
 
-## Integrating into another host
+Run with:
 
-Typical host-side wiring looks like this:
-
-1. construct a `PermissionPolicy`
-2. create a `ClientManager`
-3. optionally call `SetApprovalHandler(...)`
-4. get a client by agent name
-5. convert `PromptEvent` / `PromptResult` into your host's UI or tool model
-
-If your host already has its own permission type system, the easiest path is to adapt it to:
-
-```go
-type PermissionPolicy interface {
-	Check(toolName string, input json.RawMessage) (Decision, error)
-	AllowedPathForTool(toolName, path string) bool
-}
+```bash
+go run ./cmd/acp-go flow run --file ./flow.json
 ```
-
-That is how ggcode integrates this library internally.
-
-If your host already has a richer protocol boundary, the recommended layering is:
-
-1. keep `ggcode-acp-go` as the ACP transport/runtime layer
-2. add a small local adapter for your own permission/event/result types
-3. keep host-specific rendering, persistence, and approval UX outside this library
-
-## ggcode integration
-
-ggcode uses this library through a dedicated adapter package instead of importing it directly from
-UI/tooling call sites.
-
-The current integration pattern is:
-
-- `ggcode-acp-go` owns client/runtime/discovery
-- `ggcode/internal/acpclient` adapts it to `internal/tool.ACPAgentRegistry`
-- `ggcode/internal/acp` still owns the ACP server/handler/auth side
-
-That split keeps the reusable ACP client logic independent without forcing ggcode to rewrite its
-existing host-side permission and UI systems.
-
-For the ggcode-side details, see:
-
-- `ggcode/docs/acp-go-integration.md`
-- `ggcode/internal/acpclient/manager.go`
 
 ## Development
 
 ```bash
+test -z "$(gofmt -l .)"
 go test ./...
+go build ./cmd/acp-go
 ```
 
-## Design notes
-
-- discovery preserves the currently supported ACP-native CLIs and adds `ggcode`
-- the exported permission surface is intentionally smaller than ggcode's full policy API
-- the library defaults to no-op logging until `SetLogger(...)` is configured
-- the public API is designed so hosts can layer their own adapter without forking transport/client logic
+For architecture details, see [docs/architecture.md](docs/architecture.md).

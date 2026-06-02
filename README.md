@@ -43,7 +43,7 @@ The built-in registry currently knows how to launch:
 | Agent | Launch | Notes |
 | --- | --- | --- |
 | `pi` | `npx pi-acp@^0.0.26` | npm ACP adapter |
-| `codex` | `npx -y @agentclientprotocol/codex-acp@^0.0.44` | bridges local Codex config for ACP startup; `wire_api="chat"` is rejected early because Codex ACP now requires `responses` |
+| `codex` | `npx -y @agentclientprotocol/codex-acp@^0.0.44` | bridges local Codex config for ACP startup; direct Codex CLI can still use `wire_api="chat"`, but the ACP/app-server bridge path currently cannot |
 | `claude` | `npx -y @agentclientprotocol/claude-agent-acp@^0.37.0` | npm ACP adapter |
 | `gemini` | `gemini --acp` | native ACP mode |
 | `cursor` | `agent acp` | falls back to `cursor-agent acp` |

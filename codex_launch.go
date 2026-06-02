@@ -52,7 +52,7 @@ func codexLaunchEnv() ([]string, error) {
 	wireAPI := strings.ToLower(strings.TrimSpace(provider.WireAPI))
 	if wireAPI == "chat" {
 		return nil, fmt.Errorf(
-			"codex ACP adapter does not support model_provider %q with wire_api=%q; codex app-server now requires wire_api=%q for ACP sessions. Direct `codex exec` may still work, but `codex-acp` will not",
+			"model_provider %q with wire_api=%q is still valid for direct Codex CLI usage, but the Codex ACP/app-server bridge does not accept wire_api=%q for ACP sessions",
 			providerID, provider.WireAPI, "responses",
 		)
 	}

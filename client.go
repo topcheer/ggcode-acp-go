@@ -122,6 +122,7 @@ type Client struct {
 	promptReqTime          time.Duration
 	droidSeenNonIdle       bool
 	droidLastAssistantText string
+	droidLastFallbackText  string
 }
 
 // NewClient creates a new ACP client for the given discovered agent.
@@ -964,6 +965,7 @@ func (c *Client) promptInternal(
 	c.promptOnEvent = onEvent
 	c.droidSeenNonIdle = false
 	c.droidLastAssistantText = ""
+	c.droidLastFallbackText = ""
 	promptDone := c.promptDone
 	promptActivity := c.promptActivity
 	promptIdleTime := c.promptIdleTime
@@ -1356,6 +1358,7 @@ func (c *Client) clearPromptStateLocked() {
 	c.promptToolMeta = nil
 	c.droidSeenNonIdle = false
 	c.droidLastAssistantText = ""
+	c.droidLastFallbackText = ""
 }
 
 func (c *Client) notePromptActivity() {
@@ -1504,8 +1507,21 @@ func (c *Client) handleFactorySessionNotification(req *JSONRPCRequest) {
 		}))
 	case droidNotificationCreateMessage:
 		c.markFactoryPromptProgressLocked()
-		if notif.Notification.Message != nil && notif.Notification.Message.Role == "assistant" {
-			c.droidLastAssistantText = extractFactoryMessageText(notif.Notification.Message)
+		if notif.Notification.Message != nil {
+			text := extractFactoryMessageText(notif.Notification.Message)
+			switch notif.Notification.Message.Role {
+			case "assistant":
+				c.droidLastAssistantText = text
+			case "system":
+				if strings.TrimSpace(text) != "" {
+					c.droidLastFallbackText = text
+				}
+			}
+		}
+	case droidNotificationError:
+		c.markFactoryPromptProgressLocked()
+		if strings.TrimSpace(notif.Notification.MessageText) != "" {
+			c.droidLastFallbackText = notif.Notification.MessageText
 		}
 	case droidNotificationWorkingStateChanged:
 		if c.activePromptID != "" && notif.Notification.NewState != "" && notif.Notification.NewState != droidWorkingStateIdle {
@@ -1514,6 +1530,8 @@ func (c *Client) handleFactorySessionNotification(req *JSONRPCRequest) {
 		if c.activePromptID != "" && c.promptDone != nil && notif.Notification.NewState == droidWorkingStateIdle && c.droidSeenNonIdle {
 			if c.promptText.Len() == 0 && strings.TrimSpace(c.droidLastAssistantText) != "" {
 				c.promptText.WriteString(c.droidLastAssistantText)
+			} else if c.promptText.Len() == 0 && strings.TrimSpace(c.droidLastFallbackText) != "" {
+				c.promptText.WriteString(c.droidLastFallbackText)
 			}
 			select {
 			case c.promptDone <- PromptResponse{StopReason: StopReasonEndTurn}:

@@ -23,6 +23,7 @@ const (
 	droidMethodAskUser                                  = "droid.ask_user"
 	droidNotificationToolResult                         = "tool_result"
 	droidNotificationCreateMessage                      = "create_message"
+	droidNotificationError                              = "error"
 	droidNotificationWorkingStateChanged                = "droid_working_state_changed"
 	droidNotificationSessionTitleUpdated                = "session_title_updated"
 	droidNotificationAssistantTextDelta                 = "assistant_text_delta"
@@ -157,7 +158,8 @@ type FactorySessionNotificationPayload struct {
 	ToolUseID      string               `json:"toolUseId,omitempty"`
 	Content        json.RawMessage      `json:"content,omitempty"`
 	IsError        bool                 `json:"isError,omitempty"`
-	Message        *FactoryMessage      `json:"message,omitempty"`
+	Message        *FactoryMessage      `json:"-"`
+	MessageText    string               `json:"-"`
 	NewState       string               `json:"newState,omitempty"`
 	Title          string               `json:"title,omitempty"`
 	SessionID      string               `json:"sessionId,omitempty"`
@@ -169,9 +171,10 @@ type FactorySessionNotificationPayload struct {
 }
 
 type FactoryMessage struct {
-	ID      string                      `json:"id"`
-	Role    string                      `json:"role"`
-	Content []FactoryMessageContentItem `json:"content"`
+	ID         string                      `json:"id"`
+	Role       string                      `json:"role"`
+	Content    []FactoryMessageContentItem `json:"content"`
+	Visibility string                      `json:"visibility,omitempty"`
 }
 
 type FactoryMessageContentItem struct {
@@ -209,4 +212,61 @@ func rawJSONValue(raw json.RawMessage) string {
 		return text
 	}
 	return string(trimmed)
+}
+
+func (p *FactorySessionNotificationPayload) UnmarshalJSON(data []byte) error {
+	type wirePayload struct {
+		Type           string               `json:"type"`
+		MessageID      string               `json:"messageId,omitempty"`
+		BlockIndex     int                  `json:"blockIndex,omitempty"`
+		TextDelta      string               `json:"textDelta,omitempty"`
+		ToolUse        *FactoryToolUseBlock `json:"toolUse,omitempty"`
+		ToolUseID      string               `json:"toolUseId,omitempty"`
+		Content        json.RawMessage      `json:"content,omitempty"`
+		MessageRaw     json.RawMessage      `json:"message,omitempty"`
+		NewState       string               `json:"newState,omitempty"`
+		Title          string               `json:"title,omitempty"`
+		SessionID      string               `json:"sessionId,omitempty"`
+		TokenUsage     json.RawMessage      `json:"tokenUsage,omitempty"`
+		Settings       json.RawMessage      `json:"settings,omitempty"`
+		RequestID      string               `json:"requestId,omitempty"`
+		ToolUseIDs     []string             `json:"toolUseIds,omitempty"`
+		SelectedOption string               `json:"selectedOption,omitempty"`
+	}
+
+	var wire wirePayload
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*p = FactorySessionNotificationPayload{
+		Type:           wire.Type,
+		MessageID:      wire.MessageID,
+		BlockIndex:     wire.BlockIndex,
+		TextDelta:      wire.TextDelta,
+		ToolUse:        wire.ToolUse,
+		ToolUseID:      wire.ToolUseID,
+		Content:        wire.Content,
+		NewState:       wire.NewState,
+		Title:          wire.Title,
+		SessionID:      wire.SessionID,
+		TokenUsage:     wire.TokenUsage,
+		Settings:       wire.Settings,
+		RequestID:      wire.RequestID,
+		ToolUseIDs:     wire.ToolUseIDs,
+		SelectedOption: wire.SelectedOption,
+	}
+	if len(bytes.TrimSpace(wire.MessageRaw)) == 0 || bytes.Equal(bytes.TrimSpace(wire.MessageRaw), []byte("null")) {
+		return nil
+	}
+	var message FactoryMessage
+	if err := json.Unmarshal(wire.MessageRaw, &message); err == nil && (message.Role != "" || len(message.Content) > 0 || message.Visibility != "") {
+		p.Message = &message
+		return nil
+	}
+	var text string
+	if err := json.Unmarshal(wire.MessageRaw, &text); err == nil {
+		p.MessageText = text
+		return nil
+	}
+	return nil
 }

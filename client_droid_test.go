@@ -210,6 +210,98 @@ func TestPromptFactorySessionCompletesOnIdle(t *testing.T) {
 	}
 }
 
+func TestPromptFactorySessionFallsBackToSystemErrorMessage(t *testing.T) {
+	clientRead, serverWrite := io.Pipe()
+	serverRead, clientWrite := io.Pipe()
+	clientTransport := NewTransportWithProtocol(clientRead, clientWrite, WireProtocolFactoryJSONRPC)
+	serverTransport := NewTransportWithProtocol(serverRead, serverWrite, WireProtocolFactoryJSONRPC)
+	defer clientRead.Close()
+	defer clientWrite.Close()
+	defer serverRead.Close()
+	defer serverWrite.Close()
+
+	client := NewClient(DiscoveredAgent{Def: AgentDef{Name: "droid", WireProtocol: WireProtocolFactoryJSONRPC}}, "/workspace", nil, nil)
+	client.transport = clientTransport
+	client.running = true
+	client.sessionID = "session-droid"
+	client.sessionCWD = "/workspace"
+
+	go func() {
+		for {
+			req, resp, err := clientTransport.ReadAnyMessage()
+			if err != nil {
+				return
+			}
+			if resp != nil {
+				clientTransport.DeliverResponse(resp)
+				continue
+			}
+			if req != nil {
+				client.handleAgentRequest(context.Background(), req)
+			}
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		raw, err := serverTransport.ReadRaw()
+		if err != nil {
+			t.Errorf("ReadRaw error: %v", err)
+			return
+		}
+		var req map[string]any
+		if err := json.Unmarshal(raw, &req); err != nil {
+			t.Errorf("unmarshal request: %v", err)
+			return
+		}
+		if req["method"] != droidMethodAddUserMessage {
+			t.Errorf("expected %s, got %#v", droidMethodAddUserMessage, req["method"])
+		}
+		_ = serverTransport.WriteResponse(req["id"], map[string]any{})
+		_ = serverTransport.WriteNotification(droidMethodSessionNotification, FactorySessionNotificationParams{
+			Notification: FactorySessionNotificationPayload{Type: droidNotificationWorkingStateChanged, NewState: "streaming_assistant_message"},
+		})
+		_ = serverTransport.WriteNotification(droidMethodSessionNotification, map[string]any{
+			"notification": map[string]any{
+				"type":    droidNotificationError,
+				"message": "404 status code (no body)",
+			},
+		})
+		_ = serverTransport.WriteNotification(droidMethodSessionNotification, map[string]any{
+			"notification": map[string]any{
+				"type": droidNotificationCreateMessage,
+				"message": map[string]any{
+					"id":         "msg-system",
+					"role":       "system",
+					"visibility": "user_only",
+					"content": []map[string]any{
+						{"type": "text", "text": "BYOK Error: 404 status code (no body)"},
+					},
+				},
+			},
+		})
+		_ = serverTransport.WriteNotification(droidMethodSessionNotification, FactorySessionNotificationParams{
+			Notification: FactorySessionNotificationPayload{Type: droidNotificationWorkingStateChanged, NewState: droidWorkingStateIdle},
+		})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := client.Prompt(ctx, "hello")
+	if err != nil {
+		t.Fatalf("Prompt error: %v", err)
+	}
+	<-done
+
+	if !strings.Contains(result.Text, "BYOK Error: 404 status code (no body)") {
+		t.Fatalf("expected fallback droid error text, got %q", result.Text)
+	}
+	if result.StopReason != StopReasonEndTurn {
+		t.Fatalf("expected stop reason %q, got %q", StopReasonEndTurn, result.StopReason)
+	}
+}
+
 func TestFactoryPermissionBridgesThroughApprovalFlow(t *testing.T) {
 	var written strings.Builder
 	client := NewClient(DiscoveredAgent{Def: AgentDef{Name: "droid", WireProtocol: WireProtocolFactoryJSONRPC}}, t.TempDir(), nil, nil)

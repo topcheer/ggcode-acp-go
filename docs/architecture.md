@@ -1,11 +1,17 @@
 # ggcode-acp-go architecture
 
-`ggcode-acp-go` is no longer just a thin ACP transport/client extraction.
+`ggcode-acp-go` started as “ACP transport in Go,” but that description is too small now.
 
-It now has two stacked layers:
+The package is really a **two-layer machine**:
 
-1. a reusable ACP library layer
-2. a product/runtime layer that provides acpx-style durable sessions, history, queueing, config, and CLI flows
+1. a reusable ACP library layer for discovery, launch, transport, and prompt streaming
+2. a product/runtime layer that turns those raw ACP mechanics into durable sessions, replayable history, background queueing, config defaults, and a practical CLI
+
+The mental model is simple:
+
+- the **client layer** talks to ACP-speaking CLIs
+- the **runtime layer** remembers what happened between invocations
+- the **CLI layer** makes that state operational
 
 ## High-level layout
 
@@ -49,7 +55,7 @@ The registry uses richer launch metadata than the original extraction pass:
 - `aliases`
 - optional session support hints
 
-That shape is what lets the runtime model both native ACP CLIs and package-exec style launchers.
+That shape is what lets the runtime model both native ACP CLIs and trickier launcher styles such as package-exec wrappers, fallback binaries, and protocol-specific bridges.
 
 ### 2. ACP client layer
 
@@ -66,7 +72,7 @@ That shape is what lets the runtime model both native ACP CLIs and package-exec 
 - `session/cancel`
 - `session/close`
 
-The client layer remains reusable on its own for hosts that only want ACP transport + prompt streaming.
+This layer is still reusable on its own if all you want is “launch an ACP agent, stream a prompt, collect results.”
 
 ### 3. Product runtime layer
 
@@ -81,7 +87,7 @@ Responsibilities:
 - close, export, import, prune, and inspect sessions
 - expose a normalized runtime status surface
 
-This is the main bridge from “ACP client library” to “headless product/runtime”.
+This is the bridge from “protocol client” to “headless product.”
 
 ### 4. Durable stores
 
@@ -96,7 +102,7 @@ These stores are intentionally simple JSON/NDJSON files so they are:
 
 - inspectable by users
 - easy to back up or export
-- easy to extend without adding an embedded database dependency
+- easy to extend without immediately reaching for an embedded database
 
 ### 5. Queue owner model
 
@@ -108,7 +114,7 @@ The current queue model is file-backed and process-owned:
 - queued prompts are drained sequentially
 - `cancel` marks queued/running requests and forwards a best-effort session cancel
 
-This keeps no-wait execution durable across short-lived CLI invocations without requiring a long-running daemon install step.
+This is the key trick that makes no-wait execution feel durable without forcing a daemon install story.
 
 ### 6. CLI layer
 
@@ -122,7 +128,7 @@ This keeps no-wait execution durable across short-lived CLI invocations without 
 - agent listing
 - flow execution
 
-The CLI is intentionally thin: command handlers mostly resolve config/flags and then call the runtime layer.
+The CLI is intentionally thin: most commands resolve flags/config and hand off to the runtime.
 
 ## Data model
 
@@ -174,7 +180,7 @@ The runtime keeps ACP-specific wire handling inside the client layer and exposes
 
 The earlier extraction only solved the bottom layer.
 
-That was insufficient for parity with a headless ACP runtime because the product features actually depend on:
+That was not enough for parity with a real headless ACP runtime, because the features people actually feel depend on:
 
 - durable session identity
 - replayable history
@@ -183,4 +189,4 @@ That was insufficient for parity with a headless ACP runtime because the product
 - session-scoped controls
 - a standalone command surface
 
-The current architecture keeps the reusable ACP mechanics separate while adding those higher-level features as composable layers on top.
+So the current architecture keeps the ACP mechanics reusable, while stacking the product behavior above them instead of mixing everything into one giant client object.

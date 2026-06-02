@@ -209,7 +209,35 @@ func TestDroidLaunchUsesFactoryStreamJSONRPC(t *testing.T) {
 		if strings.Join(def.Args, " ") != strings.Join(expected, " ") {
 			t.Fatalf("expected droid args %v, got %v", expected, def.Args)
 		}
+		if len(def.CheckBinaries) < 2 || def.CheckBinaries[0] != "droid-zai" || def.CheckBinaries[1] != "droid" {
+			t.Fatalf("expected droid binary search order [droid-zai droid], got %v", def.CheckBinaries)
+		}
 		return
 	}
 	t.Fatal("droid agent definition not found")
+}
+
+func TestDiscoverDroidPrefersWrapperBinary(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"droid-zai", "droid"} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\necho ok"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", dir)
+	defer t.Setenv("PATH", origPath)
+
+	agent, err := FindLaunchTarget("droid", nil)
+	if err != nil {
+		t.Fatalf("FindLaunchTarget error: %v", err)
+	}
+	if filepath.Base(agent.Path) != "droid-zai" {
+		t.Fatalf("expected droid wrapper to be preferred, got %q", agent.Path)
+	}
+	if filepath.Base(agent.Command) != "droid-zai" {
+		t.Fatalf("expected launch command to use droid-zai, got %q", agent.Command)
+	}
 }

@@ -91,7 +91,7 @@ var KnownAgents = []AgentDef{
 		Description:    "Droid Factory stream-jsonrpc execution mode",
 		Command:        "droid",
 		Args:           []string{"exec", "--input-format", "stream-jsonrpc", "--output-format", "stream-jsonrpc"},
-		CheckBinaries:  []string{"droid"},
+		CheckBinaries:  []string{"droid-zai", "droid"},
 		Aliases:        []string{"factory-droid", "factorydroid"},
 		SessionSupport: "persistent",
 		WireProtocol:   WireProtocolFactoryJSONRPC,

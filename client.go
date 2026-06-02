@@ -840,6 +840,9 @@ func claudeSessionCreateTimeout(agent DiscoveredAgent) time.Duration {
 
 func resolvedAgentArgs(agent DiscoveredAgent, options *SessionOptions) []string {
 	args := append([]string(nil), agent.Args...)
+	if agent.Def.Name == "droid" {
+		args = appendDroidLaunchArgs(args)
+	}
 	if options == nil {
 		return args
 	}
@@ -871,6 +874,20 @@ func appendQoderSessionArgs(args []string, options *SessionOptions) []string {
 		if len(normalized) > 0 {
 			args = append(args, "--allowed-tools="+strings.Join(normalized, ","))
 		}
+	}
+	return args
+}
+
+func appendDroidLaunchArgs(args []string) []string {
+	if hasCommandFlag(args, "--settings") {
+		return args
+	}
+	for _, key := range []string{"GGCODE_ACP_DROID_SETTINGS", "ACPX_DROID_SETTINGS"} {
+		value := strings.TrimSpace(os.Getenv(key))
+		if value == "" {
+			continue
+		}
+		return append([]string{"--settings", value}, args...)
 	}
 	return args
 }

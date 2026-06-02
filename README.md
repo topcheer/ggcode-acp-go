@@ -48,7 +48,7 @@ The built-in registry currently knows how to launch:
 | `gemini` | `gemini --acp` | native ACP mode |
 | `cursor` | `agent acp` | falls back to `cursor-agent acp` |
 | `copilot` | `copilot --acp --stdio` | native ACP mode |
-| `droid` | `droid exec --input-format stream-jsonrpc --output-format stream-jsonrpc` | Factory protocol bridge; prefers `droid-zai` wrapper when present |
+| `droid` | `droid exec --input-format stream-jsonrpc --output-format stream-jsonrpc` | Factory protocol bridge; use `GGCODE_ACP_DROID_SETTINGS=/path/to/settings.xxx.json` for explicit custom-model profiles |
 | `fast-agent` | `uvx fast-agent-mcp acp` | MCP ACP bridge |
 | `kilocode` | `npx -y @kilocode/cli@rc acp` | pinned to `@rc` because stable CLI still lags ACP behavior |
 | `kimi` | `kimi acp` | native ACP mode |

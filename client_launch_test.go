@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -55,5 +56,14 @@ func TestClaudeSessionCreateTimeoutDefaultsForNonClaude(t *testing.T) {
 	os.Unsetenv("GGCODE_ACP_CLAUDE_SESSION_CREATE_TIMEOUT_MS")
 	if got := claudeSessionCreateTimeout(DiscoveredAgent{Def: AgentDef{Name: "copilot"}}); got != 30*time.Second {
 		t.Fatalf("unexpected non-claude timeout: %v", got)
+	}
+}
+
+func TestResolvedAgentArgsPrependsDroidSettingsOverride(t *testing.T) {
+	t.Setenv("GGCODE_ACP_DROID_SETTINGS", "/tmp/droid-settings.json")
+	args := resolvedAgentArgs(DiscoveredAgent{Def: AgentDef{Name: "droid"}, Args: []string{"exec", "--input-format", "stream-jsonrpc"}}, nil)
+	want := []string{"--settings", "/tmp/droid-settings.json", "exec", "--input-format", "stream-jsonrpc"}
+	if strings.Join(args, " ") != strings.Join(want, " ") {
+		t.Fatalf("expected droid args %v, got %v", want, args)
 	}
 }
